@@ -1,0 +1,314 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    name: Discover CMake projects
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.projects.outputs.matrix }}
+
+    steps:
+      # Deliberately do not populate submodules here. That prevents CMakeLists.txt
+      # files belonging to vendored/submodule dependencies from being discovered
+      # as standalone test apps.
+      - uses: actions/checkout@v6
+
+      - name: Build project matrix
+        id: projects
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          # These contain standalone CMakeLists.txt files, but they are Android
+          # projects and cannot be configured as native Windows/Linux builds.
+          no_desktop_build = {
+              "openxr/android-quad-webview",
+              "openxr/quest-openxr-vulkan",
+          }
+
+          # These currently only build on Windows.
+          windows_only = {
+              "drivers/display_redirect",
+              "openxr/actions-tester",
+          }
+
+          cmake_dirs = sorted({
+              path.parent
+              for path in Path(".").rglob("CMakeLists.txt")
+              if ".git" not in path.parts
+          })
+
+          # If a CMakeLists.txt lives beneath another project CMakeLists.txt,
+          # treat only the outer project as standalone. This avoids accidentally
+          # building helper CMake directories as their own applications.
+          project_dirs = []
+          for directory in cmake_dirs:
+              if directory == Path("."):
+                  continue
+
+              parent = directory.parent
+              nested = False
+              while parent != Path("."):
+                  if (parent / "CMakeLists.txt").is_file():
+                      nested = True
+                      break
+                  parent = parent.parent
+
+              if not nested:
+                  project_dirs.append(directory)
+
+          include = []
+          for directory in project_dirs:
+              project = directory.as_posix()
+              if project in no_desktop_build:
+                  continue
+
+              cmake_text = (directory / "CMakeLists.txt").read_text(
+                  encoding="utf-8", errors="ignore"
+              ).lower()
+              needs_vulkan = "find_package(vulkan" in cmake_text
+
+              safe_name = project.replace("/", "-").replace("_", "-")
+
+              include.append({
+                  "project": project,
+                  "platform": "windows",
+                  "runner": "windows-latest",
+                  "artifact": safe_name,
+                  "needs_vulkan": needs_vulkan,
+              })
+
+              if project not in windows_only:
+                  include.append({
+                      "project": project,
+                      "platform": "linux",
+                      "runner": "ubuntu-latest",
+                      "artifact": safe_name,
+                      "needs_vulkan": needs_vulkan,
+                  })
+
+          if not include:
+              raise SystemExit("No desktop CMake projects found")
+
+          matrix = json.dumps({"include": include}, separators=(",", ":"))
+          print(json.dumps(include, indent=2))
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"matrix={matrix}", file=output)
+          PY
+
+  build:
+    name: ${{ matrix.platform }} / ${{ matrix.project }}
+    needs: discover
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+
+    env:
+      BUILD_DIR: ${{ github.workspace }}/.ci-build
+      PACKAGE_DIR: ${{ github.workspace }}/.ci-package
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            glslc \
+            libgl1-mesa-dev \
+            libvulkan-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxext-dev \
+            libxfixes-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev
+
+      - name: Install Vulkan SDK on Windows
+        if: runner.os == 'Windows' && matrix.needs_vulkan
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk --version=1.4.350 -y --no-progress
+
+          $sdk = Get-ChildItem "C:\VulkanSDK" -Directory |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+
+          if (-not $sdk) {
+            throw "Vulkan SDK installation was not found under C:\VulkanSDK"
+          }
+
+          "VULKAN_SDK=$($sdk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$($sdk.FullName)\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -E make_directory "$BUILD_DIR/.cmake/api/v1/query"
+          cmake -E touch "$BUILD_DIR/.cmake/api/v1/query/codemodel-v2"
+
+          cmake \
+            -S "${{ matrix.project }}" \
+            -B "$BUILD_DIR" \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: bash
+        run: cmake --build "$BUILD_DIR" --config Release --parallel
+
+      - name: Collect built binaries
+        shell: bash
+        env:
+          PROJECT: ${{ matrix.project }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          build_dir = Path(os.environ["BUILD_DIR"])
+          package_dir = Path(os.environ["PACKAGE_DIR"])
+          project = os.environ["PROJECT"]
+          platform = os.environ["PLATFORM"]
+
+          reply_dir = build_dir / ".cmake" / "api" / "v1" / "reply"
+          indexes = sorted(reply_dir.glob("index-*.json"))
+          if not indexes:
+              raise SystemExit("CMake file API reply was not generated")
+
+          index = json.loads(indexes[-1].read_text(encoding="utf-8"))
+          codemodel_ref = index.get("reply", {}).get("codemodel-v2")
+          if not codemodel_ref:
+              raise SystemExit("CMake codemodel-v2 reply was not generated")
+
+          codemodel = json.loads(
+              (reply_dir / codemodel_ref["jsonFile"]).read_text(encoding="utf-8")
+          )
+
+          configurations = codemodel.get("configurations", [])
+          if not configurations:
+              raise SystemExit("CMake codemodel has no configurations")
+
+          configuration = next(
+              (cfg for cfg in configurations if cfg.get("name") == "Release"),
+              configurations[0],
+          )
+
+          destination = package_dir / platform / Path(project)
+          destination.mkdir(parents=True, exist_ok=True)
+
+          copied = set()
+          binary_target_types = {"EXECUTABLE", "SHARED_LIBRARY", "MODULE_LIBRARY"}
+
+          for target_ref in configuration.get("targets", []):
+              target = json.loads(
+                  (reply_dir / target_ref["jsonFile"]).read_text(encoding="utf-8")
+              )
+
+              if target.get("type") not in binary_target_types:
+                  continue
+
+              for artifact in target.get("artifacts", []):
+                  source = Path(artifact["path"])
+                  if not source.is_absolute():
+                      source = build_dir / source
+
+                  if not source.is_file():
+                      continue
+
+                  output = destination / source.name
+                  key = str(output).lower()
+                  if key in copied:
+                      continue
+
+                  shutil.copy2(source, output)
+                  copied.add(key)
+                  print(f"{source} -> {output}")
+
+          if not copied:
+              raise SystemExit(f"No binaries found for {project} ({platform})")
+          PY
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: binaries-${{ matrix.platform }}-${{ matrix.artifact }}
+          path: ${{ env.PACKAGE_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create GitHub release
+    needs: [discover, build]
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: binaries-*
+          path: release-tree
+          merge-multiple: true
+
+      - name: Choose release tag
+        id: version
+        shell: bash
+        run: |
+          TAG="v0.0.${GITHUB_RUN_NUMBER}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build combined ZIP
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          cd release-tree
+          zip -9 -r "../VR-Test-Apps-${TAG}.zip" windows linux
+
+      - name: Create release and tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          ZIP="VR-Test-Apps-${TAG}.zip"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" --clobber
+          else
+            gh release create "$TAG" "$ZIP" \
+              --target "$GITHUB_SHA" \
+              --title "VR Test Apps $TAG" \
+              --generate-notes
+          fi
