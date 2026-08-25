@@ -1,0 +1,8 @@
+{
+    "alwaysActivate": true,
+    "name": "display_redirect_sample",
+    "redirectsDisplay": true,
+    "hmd_presence": [
+        "*.*"
+    ]
+}

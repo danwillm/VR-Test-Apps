@@ -1,0 +1,13 @@
+{
+    "driver_display_redirect_sample": {
+        "enable": true,
+        "serialNumber": "danwillm_display_redirect",
+        "modelNumber": "DANWILLMDISPLAYREDIRECT",
+        "adapterIndex": 0,
+        "refreshRate": 90.0,
+        "showPreview": true,
+        "previewWidth": 1280,
+        "previewHeight": 720,
+        "waitForVsync": true
+    }
+}
