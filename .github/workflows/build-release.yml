@@ -346,7 +346,7 @@ jobs:
         run: |
           TAG="v0.0.${GITHUB_RUN_NUMBER}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
+      
       - name: Build combined ZIP
         shell: bash
         env:
@@ -354,13 +354,13 @@ jobs:
         run: |
           cd release-tree
           zip -9 -r "../VR-Test-Apps-${TAG}.zip" windows linux
-
+      
       - name: Create GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ needs.version.outputs.tag }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           ZIP="VR-Test-Apps-${TAG}.zip"
       
