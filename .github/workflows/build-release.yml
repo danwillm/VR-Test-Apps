@@ -121,12 +121,68 @@ jobs:
 
     env:
       BUILD_DIR: ${{ github.workspace }}/.ci-build
-      PACKAGE_DIR: ${{ github.workspace }}/.ci-package
+      PACKAGE_DIR: ${{ github.workspace }}/ci-package
 
     steps:
       - uses: actions/checkout@v6
-        with:
-          submodules: recursive
+
+      # Several apps were copied into this monorepo from repositories that had
+      # their own submodules. Their .gitmodules files now live below the repo
+      # root, so actions/checkout cannot initialize them as Git submodules.
+      # Populate those dependencies explicitly before running CMake.
+      - name: Fetch project-local dependencies
+        shell: bash
+        env:
+          PROJECT: ${{ matrix.project }}
+        run: |
+          python3 <<'PY'
+          import configparser
+          import os
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          project = Path(os.environ["PROJECT"])
+          gitmodules = project / ".gitmodules"
+
+          if not gitmodules.is_file():
+              print(f"{project}: no project-local .gitmodules")
+              raise SystemExit(0)
+
+          config = configparser.ConfigParser()
+          config.read(gitmodules, encoding="utf-8")
+
+          for section in config.sections():
+              if not section.startswith("submodule "):
+                  continue
+
+              relative_path = config[section].get("path")
+              url = config[section].get("url")
+              branch = config[section].get("branch")
+
+              if not relative_path or not url:
+                  raise SystemExit(
+                      f"Invalid submodule entry {section!r} in {gitmodules}"
+                  )
+
+              destination = project / relative_path
+
+              # There are no gitlink entries for these nested .gitmodules in
+              # the top-level repository, so there is no recorded submodule SHA
+              # to check out. Clone the dependency's configured branch/default
+              # branch instead.
+              if destination.exists():
+                  shutil.rmtree(destination)
+              destination.parent.mkdir(parents=True, exist_ok=True)
+
+              command = ["git", "clone", "--depth", "1"]
+              if branch:
+                  command += ["--branch", branch]
+              command += [url, str(destination)]
+
+              print("+", " ".join(command))
+              subprocess.run(command, check=True)
+          PY
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -176,7 +232,8 @@ jobs:
           cmake \
             -S "${{ matrix.project }}" \
             -B "$BUILD_DIR" \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_TYPE=Release \
+            -DFETCHCONTENT_QUIET=OFF
 
       - name: Build
         shell: bash
