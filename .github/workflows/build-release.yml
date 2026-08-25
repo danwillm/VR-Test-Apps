@@ -355,19 +355,20 @@ jobs:
           cd release-tree
           zip -9 -r "../VR-Test-Apps-${TAG}.zip" windows linux
 
-      - name: Create release and tag
+      - name: Create GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
           ZIP="VR-Test-Apps-${TAG}.zip"
-
+      
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$ZIP" --clobber
           else
             gh release create "$TAG" "$ZIP" \
-              --target "$GITHUB_SHA" \
+              --target "${{ github.sha }}" \
               --title "VR Test Apps $TAG" \
               --generate-notes
           fi
