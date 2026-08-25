@@ -204,7 +204,8 @@ jobs:
             libxi-dev \
             libxcb1-dev \
             libxkbcommon-dev \
-            libxkbcommon-x11-dev
+            libxkbcommon-x11-dev \
+            libglu1-mesa-dev
 
       - name: Install Vulkan SDK on Windows
         if: runner.os == 'Windows' && matrix.needs_vulkan
