@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#include <string>
 
 namespace {
 
