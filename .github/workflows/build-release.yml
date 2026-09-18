@@ -43,7 +43,8 @@ jobs:
           windows_only = {
               "drivers/display_redirect",
               "openxr/actions-tester",
-              "openvr/d3d11_openvr_triangle"
+              "openvr/d3d11_openvr_triangle",
+              "openxr/openxr-d3d11-triangle"
           }
 
           cmake_dirs = sorted({
