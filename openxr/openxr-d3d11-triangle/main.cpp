@@ -133,7 +133,7 @@ private:
             "None",
             XR_MAX_ENGINE_NAME_SIZE - 1);
         createInfo.applicationInfo.engineVersion = 1;
-        createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+        createInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 34);
         createInfo.enabledExtensionCount = static_cast<uint32_t>(std::size(enabledExtensions));
         createInfo.enabledExtensionNames = enabledExtensions;
 
